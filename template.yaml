@@ -1,0 +1,350 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  FailRate:
+    Type: Number
+    Default: 0.2
+    MinValue: 0
+    MaxValue: 1
+
+Globals:
+  Function:
+    Runtime: python3.13
+    MemorySize: 256
+    Timeout: 15
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        POWERTOOLS_SERVICE_NAME: obs-workshop
+        POWERTOOLS_METRICS_NAMESPACE: ObsWorkshop
+        LOG_LEVEL: INFO
+
+Resources:
+  # -------------------------------------------------------------------------
+  # DynamoDB
+  # -------------------------------------------------------------------------
+  OrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: obs-workshop-orders
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: orderId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: orderId
+          KeyType: HASH
+
+  # -------------------------------------------------------------------------
+  # SQS: main queue + dead-letter queue
+  # -------------------------------------------------------------------------
+  OrdersDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: obs-workshop-orders-dlq
+      MessageRetentionPeriod: 1209600 # 14 days
+
+  OrdersQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: obs-workshop-orders
+      VisibilityTimeout: 90
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OrdersDLQ.Arn
+        maxReceiveCount: 3
+
+  # -------------------------------------------------------------------------
+  # SNS
+  # -------------------------------------------------------------------------
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: obs-workshop-alerts
+      DisplayName: Obs Workshop Alerts
+
+  # -------------------------------------------------------------------------
+  # EventBridge custom bus
+  # -------------------------------------------------------------------------
+  WorkshopBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: obs-workshop-bus
+
+  # -------------------------------------------------------------------------
+  # Lambda functions
+  # -------------------------------------------------------------------------
+
+  # 1) API -> validate -> enqueue to SQS
+  IngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: obs-workshop-ingest
+      Handler: ingest.handler
+      CodeUri: src/ingest/
+      LoggingConfig:
+        LogGroup: !Ref IngestFunctionLogGroup
+      Environment:
+        Variables:
+          QUEUE_URL: !Ref OrdersQueue
+          EVENT_BUS_NAME: !Ref WorkshopBus
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt OrdersQueue.QueueName
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref WorkshopBus
+      Events:
+        PostOrders:
+          Type: Api
+          Properties:
+            RestApiId: !Ref WorkshopApi
+            Path: /orders
+            Method: post
+        PostWorkflow:
+          Type: Api
+          Properties:
+            RestApiId: !Ref WorkshopApi
+            Path: /workflow
+            Method: post
+
+  # 2) SQS -> process -> DynamoDB (intermittent failure on purpose)
+  ProcessFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: obs-workshop-process
+      Handler: process.handler
+      CodeUri: src/process/
+      LoggingConfig:
+        LogGroup: !Ref ProcessFunctionLogGroup
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref OrdersTable
+          FAIL_RATE: !Ref FailRate
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref OrdersTable
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt OrdersQueue.Arn
+            BatchSize: 5
+
+  # 3) Step Functions task: validate
+  ValidateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: obs-workshop-validate
+      Handler: validate.handler
+      CodeUri: src/validate/
+      LoggingConfig:
+        LogGroup: !Ref ValidateFunctionLogGroup
+      Tracing: Active
+
+  # 4) Step Functions task: fulfill -> DynamoDB
+  FulfillFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: obs-workshop-fulfill
+      Handler: fulfill.handler
+      CodeUri: src/fulfill/
+      LoggingConfig:
+        LogGroup: !Ref FulfillFunctionLogGroup
+      Tracing: Active
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref OrdersTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref OrdersTable
+
+  # 5) EventBridge rule target
+  AuditFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: obs-workshop-audit
+      Handler: audit.handler
+      CodeUri: src/audit/
+      LoggingConfig:
+        LogGroup: !Ref AuditFunctionLogGroup
+      Events:
+        AuditRule:
+          Type: EventBridgeRule
+          Properties:
+            EventBusName: !Ref WorkshopBus
+            Pattern:
+              source:
+                - obs.workshop.orders
+
+  # -------------------------------------------------------------------------
+  # API Gateway REST API
+  # -------------------------------------------------------------------------
+  WorkshopApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: obs-workshop-api
+      StageName: prod
+
+  # ApiGwAccountConfig:
+  #   Type: 'AWS::ApiGateway::Account'
+  #   Properties:
+  #     CloudWatchRoleArn: !GetAtt 'ApiGatewayLoggingRole.Arn'
+
+  # ApiGatewayLoggingRole:
+  #   Type: 'AWS::IAM::Role'
+  #   Properties:
+  #     AssumeRolePolicyDocument:
+  #       Version: '2012-10-17'
+  #       Statement:
+  #         - Effect: Allow
+  #           Principal:
+  #             Service:
+  #               - 'apigateway.amazonaws.com'
+  #           Action: 'sts:AssumeRole'
+  #     Path: '/'
+  #     ManagedPolicyArns:
+  #       - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs'
+
+  # -------------------------------------------------------------------------
+  # Step Functions Standard workflow
+  # -------------------------------------------------------------------------
+  OrderStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: obs-workshop-order-workflow
+      Type: STANDARD
+      Tracing:
+        Enabled: true
+      Definition:
+        Comment: Validate then fulfill an order
+        StartAt: Validate
+        States:
+          Validate:
+            Type: Task
+            Resource: !GetAtt ValidateFunction.Arn
+            Next: Fulfill
+          Fulfill:
+            Type: Task
+            Resource: !GetAtt FulfillFunction.Arn
+            End: true
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ValidateFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref FulfillFunction
+        - Statement:
+            - Sid: StepFunctionsCloudWatchLogsDelivery
+              Effect: Allow
+              Action:
+                - logs:CreateLogDelivery
+                - logs:GetLogDelivery
+                - logs:UpdateLogDelivery
+                - logs:DeleteLogDelivery
+                - logs:ListLogDeliveries
+                - logs:PutResourcePolicy
+                - logs:DescribeResourcePolicies
+                - logs:DescribeLogGroups
+              Resource: '*'
+        - Statement:
+            - Sid: StepFunctionsXRayTracing
+              Effect: Allow
+              Action:
+                - xray:PutTraceSegments
+                - xray:PutTelemetryRecords
+                - xray:GetSamplingRules
+                - xray:GetSamplingTargets
+              Resource: '*'
+      Events:
+        WorkflowRequested:
+          Type: EventBridgeRule
+          Properties:
+            EventBusName: !Ref WorkshopBus
+            Pattern:
+              source:
+                - obs.workshop.orders
+              detail-type:
+                - OrderWorkflowRequested
+            InputTransformer:
+              InputPathsMap:
+                orderId: $.detail.orderId
+                item: $.detail.item
+                quantity: $.detail.quantity
+              InputTemplate: |
+                {"orderId": <orderId>, "item": <item>, "quantity": <quantity>}
+
+  # -------------------------------------------------------------------------
+  # Log groups
+  # -------------------------------------------------------------------------
+  IngestFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/obs-workshop-ingest
+      RetentionInDays: 5
+
+  ProcessFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/obs-workshop-process
+      RetentionInDays: 5
+
+  ValidateFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/obs-workshop-validate
+      RetentionInDays: 5
+
+  FulfillFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/obs-workshop-fulfill
+      RetentionInDays: 5
+
+  AuditFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/obs-workshop-audit
+      RetentionInDays: 5
+
+  ApiGatewayAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /obs-workshop/apigw-access
+      RetentionInDays: 5
+
+  SnsDeliveryStatusLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub sns/${AWS::Region}/${AWS::AccountId}/obs-workshop-alerts
+      RetentionInDays: 5
+
+  OrderWorkflowLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /obs-workshop/order-workflow-logs
+      RetentionInDays: 5
+
+Outputs:
+  ApiBaseUrl:
+    Description: Base URL of the workshop API (prod stage)
+    Value: !Sub https://${WorkshopApi}.execute-api.${AWS::Region}.amazonaws.com/prod
+  ApiGatewayAccessLogGroupArn:
+    Value: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${ApiGatewayAccessLogGroup}
+  OrdersQueueUrl:
+    Value: !Ref OrdersQueue
+  OrdersDLQUrl:
+    Value: !Ref OrdersDLQ
+  OrdersDLQArn:
+    Value: !GetAtt OrdersDLQ.Arn
+  OrdersTableName:
+    Value: !Ref OrdersTable
+  AlertTopicArn:
+    Value: !Ref AlertTopic
+  WorkshopBusName:
+    Value: !Ref WorkshopBus
+  StateMachineArn:
+    Value: !Ref OrderStateMachine
+  IngestFunctionName:
+    Value: !Ref IngestFunction
+  ProcessFunctionName:
+    Value: !Ref ProcessFunction
