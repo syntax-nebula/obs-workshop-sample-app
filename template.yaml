@@ -64,6 +64,64 @@ Resources:
       TopicName: obs-workshop-alerts
       DisplayName: Obs Workshop Alerts
 
+  SnsSuccessFeedbackRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnEquals:
+                aws:SourceArn: !Ref AlertTopic
+      Policies:
+        - PolicyName: sns-success-feedback
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:PutMetricFilter
+                  - logs:PutRetentionPolicy
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:sns/${AWS::Region}/${AWS::AccountId}/obs-workshop-alerts:*
+
+  SnsFailureFeedbackRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnEquals:
+                aws:SourceArn: !Ref AlertTopic
+      Policies:
+        - PolicyName: sns-failure-feedback
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:PutMetricFilter
+                  - logs:PutRetentionPolicy
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:sns/${AWS::Region}/${AWS::AccountId}/obs-workshop-alerts/Failure:*
+
   # -------------------------------------------------------------------------
   # EventBridge custom bus
   # -------------------------------------------------------------------------
@@ -340,6 +398,10 @@ Outputs:
     Value: !Ref OrdersTable
   AlertTopicArn:
     Value: !Ref AlertTopic
+  SnsSuccessFeedbackRoleArn:
+    Value: !GetAtt SnsSuccessFeedbackRole.Arn
+  SnsFailureFeedbackRoleArn:
+    Value: !GetAtt SnsFailureFeedbackRole.Arn
   WorkshopBusName:
     Value: !Ref WorkshopBus
   StateMachineArn:
