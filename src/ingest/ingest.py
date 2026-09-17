@@ -10,8 +10,8 @@ import json
 import os
 import uuid
 import logging
-# === TASK 4 SNIPPET 1 STARTS ===
-# Add code here
+# === TASK 4 SNIPPET 1 STARTS - ADD CODE BETWEEN THE COMMENTS ===
+
 # === TASK 4 SNIPPET 1 ENDS ===
 
 import boto3
@@ -32,8 +32,8 @@ def _response(status_code, body):
         "body": json.dumps(body),
     }
 
-# === TASK 4 SNIPPET 2 STARTS ===
-# Add code here
+# === TASK 4 SNIPPET 2 STARTS - ADD CODE BETWEEN THE COMMENTS ===
+
 # === TASK 4 SNIPPET 2 ENDS ===
 
 def handler(event, context):
@@ -68,8 +68,8 @@ def handler(event, context):
     order_id = payload.get("orderId") or str(uuid.uuid4())
     message = {"orderId": order_id, **payload}
     sqs.send_message(QueueUrl=QUEUE_URL, MessageBody=json.dumps(message))
-    # === TASK 4 SNIPPET 2 STARTS ===
-    # Add code here
+    # === TASK 4 SNIPPET 3 STARTS - ADD CODE BETWEEN THE COMMENTS ===
+
     # === TASK 4 SNIPPET 2 ENDS ===
     logger.info("Enqueued order %s", order_id)
     return _response(202, {"orderId": order_id, "status": "queued"})
