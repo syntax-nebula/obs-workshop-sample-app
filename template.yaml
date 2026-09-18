@@ -252,6 +252,9 @@ Resources:
             Pattern:
               source:
                 - obs.workshop.orders
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt OrdersDLQ.QueueName
 
   # -------------------------------------------------------------------------
   # API Gateway REST API
