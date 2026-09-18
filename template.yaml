@@ -152,6 +152,15 @@ Resources:
             QueueName: !GetAtt OrdersQueue.QueueName
         - EventBridgePutEventsPolicy:
             EventBusName: !Ref WorkshopBus
+        - Statement:
+            - Sid: XRayTracing
+              Effect: Allow
+              Action:
+                - xray:PutTraceSegments
+                - xray:PutTelemetryRecords
+                - xray:GetSamplingRules
+                - xray:GetSamplingTargets
+              Resource: '*'
       Events:
         PostOrders:
           Type: Api
@@ -182,6 +191,15 @@ Resources:
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref OrdersTable
+        - Statement:
+            - Sid: XRayTracing
+              Effect: Allow
+              Action:
+                - xray:PutTraceSegments
+                - xray:PutTelemetryRecords
+                - xray:GetSamplingRules
+                - xray:GetSamplingTargets
+              Resource: '*'
       Events:
         FromQueue:
           Type: SQS
